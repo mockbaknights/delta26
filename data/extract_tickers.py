@@ -5,7 +5,6 @@ Extract QQQ and SPY minute bars from Massive flatfiles and write parquet outputs
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Dict, List
 import json
@@ -14,7 +13,7 @@ import time
 import pandas as pd
 
 TICKERS = ["QQQ", "SPY"]
-SOURCE_GLOB = "data/raw/flatfiles/*/*.csv.gz"
+SOURCE_ROOT = Path("data/raw/flatfiles")
 DEST_DIR = Path("data/processed")
 DEST_DIR_QQQ = DEST_DIR / "qqq"
 DEST_DIR_SPY = DEST_DIR / "spy"
@@ -54,20 +53,20 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.rename(
         columns={
             ts_col: "timestamp",
-            cols_lower["open"]: "open",
-            cols_lower["high"]: "high",
-            cols_lower["low"]: "low",
-            cols_lower["close"]: "close",
-            cols_lower["volume"]: "volume",
-            cols_lower["ticker"]: "ticker",
+            cols_lower["open"]: "Open",
+            cols_lower["high"]: "High",
+            cols_lower["low"]: "Low",
+            cols_lower["close"]: "Close",
+            cols_lower["volume"]: "Volume",
+            cols_lower["ticker"]: "symbol",
         }
     )
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ns", utc=True)
-    return df[["timestamp", "ticker", "open", "high", "low", "close", "volume"]]
+    return df[["timestamp", "symbol", "Open", "High", "Low", "Close", "Volume"]]
 
 
 def process_files() -> pd.DataFrame:
-    files = sorted(Path().glob(SOURCE_GLOB))
+    files = sorted(SOURCE_ROOT.rglob("*.csv.gz"))
     logging.info("Found %d files", len(files))
     frames: List[pd.DataFrame] = []
     processed = 0
@@ -76,7 +75,11 @@ def process_files() -> pd.DataFrame:
         try:
             logging.info("Reading %s", fp)
             df = pd.read_csv(fp, compression="gzip", low_memory=False)
-            df = df[df["ticker"].str.upper().isin(TICKERS)]
+            if "ticker" not in df.columns:
+                logging.warning("Missing ticker column in %s", fp)
+                continue
+            df["ticker"] = df["ticker"].str.upper()
+            df = df[df["ticker"].isin(TICKERS)]
             if df.empty:
                 logging.info("No target tickers in %s", fp)
                 continue
@@ -93,8 +96,8 @@ def process_files() -> pd.DataFrame:
         return pd.DataFrame(columns=["timestamp", "ticker", "open", "high", "low", "close", "volume"])
 
     all_df = pd.concat(frames, ignore_index=True)
-    all_df = all_df.drop_duplicates(subset=["timestamp", "ticker"])
-    all_df = all_df.sort_values("timestamp")
+    all_df = all_df.drop_duplicates(subset=["timestamp", "symbol"])
+    all_df = all_df.sort_values(["symbol", "timestamp"])
     logging.info("Processed %d files; total rows=%d", processed, len(all_df))
     return all_df
 
@@ -120,7 +123,7 @@ def summarize(df: pd.DataFrame, ticker: str, path: Path) -> None:
 def write_parquet(df: pd.DataFrame, ticker: str, dest_dir: Path) -> None:
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"{ticker.lower()}_1m.parquet"
-    sub = df[df["ticker"].str.upper() == ticker].copy()
+    sub = df[df["symbol"].str.upper() == ticker].copy()
     if sub.empty:
         logging.warning("No rows for %s; skipping write to %s", ticker, dest)
         return

@@ -1,9 +1,5 @@
 """
-Runner for Delta Vortex ML Strategy v1 (frozen).
-
-Loads sample OHLCV data, applies Delta Vortex features, labels with the
-triple-barrier method, prepares training data, trains XGBoost, evaluates,
-and saves the model artifact.
+Runner for Delta Vortex ML Strategy v1 using Massive flatfiles (SPY/QQQ).
 """
 
 from __future__ import annotations
@@ -33,55 +29,9 @@ from research.train_v1 import (
 )
 from research.run_monte_carlo import run as run_monte_carlo
 
-REGISTRY_PATH = Path("research/models/model_registry.json")
-
-
-def generate_sample_data(rows: int = 400) -> pd.DataFrame:
-    """Create a small synthetic OHLCV dataset for demo/training."""
-    rng = pd.date_range("2023-01-01", periods=rows, freq="H")
-    base = 100 + np.cumsum(np.random.normal(0, 0.4, size=rows))
-
-    opens = base + np.random.normal(0, 0.1, size=rows)
-    closes = base + np.random.normal(0, 0.1, size=rows)
-    highs = np.maximum(opens, closes) + np.abs(np.random.normal(0.2, 0.1, size=rows))
-    lows = np.minimum(opens, closes) - np.abs(np.random.normal(0.2, 0.1, size=rows))
-    volume = np.random.randint(1_000, 5_000, size=rows)
-
-    return pd.DataFrame(
-        {
-            "timestamp": rng,
-            "Open": opens,
-            "High": highs,
-            "Low": lows,
-            "Close": closes,
-            "Volume": volume,
-        }
-    )
-
-
-def ensure_data(data_dir: Path) -> list[Path]:
-    """Ensure raw data exists; if absent, generate a synthetic sample."""
-    data_dir.mkdir(parents=True, exist_ok=True)
-    csv_files = sorted(data_dir.glob("*.csv"))
-    if not csv_files:
-        sample_path = data_dir / "sample_generated.csv"
-        generate_sample_data().to_csv(sample_path, index=False)
-        csv_files = [sample_path]
-    return csv_files
-
-
-def load_dataframes(csv_files: list[Path]) -> pd.DataFrame:
-    """Load and concatenate CSVs, ensuring timestamp order."""
-    frames = []
-    for path in csv_files:
-        df = pd.read_csv(path)
-        if "timestamp" in df.columns:
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
-        frames.append(df)
-    combined = pd.concat(frames, ignore_index=True)
-    if "timestamp" in combined.columns:
-        combined = combined.sort_values("timestamp")
-    return combined.reset_index(drop=True)
+SYMBOLS = ["SPY", "QQQ"]
+DATA_DIR = Path("data/processed")
+REGISTRY_PATH = Path("research/models/registry.json")
 
 
 def apply_triple_barrier_labels(
@@ -134,26 +84,40 @@ def apply_triple_barrier_labels(
     return df
 
 
+def load_processed_parquets(symbols: list[str], data_dir: Path) -> pd.DataFrame:
+    frames = []
+    for sym in symbols:
+        path = data_dir / sym.lower() / f"{sym.lower()}_1m.parquet"
+        if not path.exists():
+            raise FileNotFoundError(f"Missing parquet for {sym}: {path}")
+        df = pd.read_parquet(path)
+        if "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        df["symbol"] = sym
+        frames.append(df)
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
+    return combined
+
+
 def main() -> None:
     research_dir = Path(__file__).resolve().parent
-    data_dir = ROOT / "data" / "raw"
-    processed_dir = ROOT / "data" / "processed"
+    data_dir = ROOT / DATA_DIR
+    processed_dir = data_dir
     models_root = research_dir / "models"
     reports_dir = research_dir / "reports"
     models_root.mkdir(parents=True, exist_ok=True)
     reports_dir.mkdir(parents=True, exist_ok=True)
     processed_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_files = ensure_data(data_dir)
-    df_raw = load_dataframes(csv_files)
+    df_raw = load_processed_parquets(SYMBOLS, data_dir)
 
     # Feature engineering
     df_features = add_delta_vortex_features(df_raw)
-    feature_path = processed_dir / "feature_table.parquet"
-    df_features.to_parquet(feature_path, index=False)
-
     # Labeling
     df_labeled = apply_triple_barrier_labels(df_features)
+    feature_path = processed_dir / "feature_table.parquet"
+    df_labeled.to_parquet(feature_path, index=False)
 
     # Training data prep
     X, y = prepare_training_data(df_labeled, drop_lookahead_rows=15)
@@ -184,14 +148,19 @@ def main() -> None:
         except Exception:
             registry = {"active_version": None, "versions": []}
 
-    existing = [
-        v["version"] for v in registry.get("versions", []) if "version" in v
-    ]
+    existing = [v["version"] for v in registry.get("versions", []) if "version" in v]
     next_idx = (
-        max([int(v.lstrip("v")) for v in existing if v.startswith("v") and v[1:].isdigit()], default=0)
-        + 1
+        max(
+            [
+                float(v.lstrip("v"))
+                for v in existing
+                if v.startswith("v") and v[1:].replace(".", "").isdigit()
+            ],
+            default=0.0,
+        )
+        + 1.0
     )
-    version = f"v{next_idx}"
+    version = f"v{next_idx:.1f}"
     version_dir = models_root / version
     version_dir.mkdir(parents=True, exist_ok=True)
 
@@ -267,6 +236,8 @@ def main() -> None:
     with REGISTRY_PATH.open("w") as f:
         json.dump(registry, f, indent=2)
 
+    ts_min = df_labeled["timestamp"].min()
+    ts_max = df_labeled["timestamp"].max()
     print("Saved model to:", model_path)
     print("Saved metrics to:", metrics_path)
     print("Saved feature table to:", feature_path)
@@ -276,6 +247,10 @@ def main() -> None:
     print(
         f"Summary -> train_acc: {train_acc:.4f}, val_acc: {val_acc:.4f}, profit_factor_est: {profit_factor_est:.4f}"
     )
+    print(f"Symbols used: {', '.join(SYMBOLS)}")
+    print(f"Date range: {ts_min} -> {ts_max}")
+    print(f"Train rows: {len(X_train)} Validation rows: {len(X_test)}")
+    print(f"Model version: {version}")
     print(f"Registry updated. Active version: {version}")
 
 

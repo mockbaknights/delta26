@@ -16,17 +16,17 @@ SOURCE_FILES = {
     "SPY": Path("data/processed/spy/spy_1m.parquet"),
 }
 
-FREQS = ["2min", "3min", "5min", "10min", "30min", "1H", "4H", "1D"]
+FREQS = ["2min", "3min", "5min", "10min", "15min", "30min", "1H", "4H", "1D"]
 
 AGG = {
-    "open": "first",
-    "high": "max",
-    "low": "min",
-    "close": "last",
-    "volume": "sum",
+    "Open": "first",
+    "High": "max",
+    "Low": "min",
+    "Close": "last",
+    "Volume": "sum",
 }
 
-REQUIRED_COLS = {"timestamp", "open", "high", "low", "close", "volume", "ticker"}
+REQUIRED_COLS = {"timestamp", "Open", "High", "Low", "Close", "Volume", "symbol"}
 OPS_DIR = Path("data/ops/tmp")
 
 
@@ -62,8 +62,9 @@ def resample_symbol(symbol: str, src_path: Path) -> dict:
     dest_dir = src_path.parent
     stats = {}
     for freq in FREQS:
-        resampled = df.resample(freq).agg(AGG).dropna(subset=["open", "high", "low", "close"])
+        resampled = df.resample(freq).agg(AGG).dropna(subset=["Open", "High", "Low", "Close"])
         resampled = resampled.reset_index()
+        resampled["symbol"] = symbol
         dest = dest_dir / f"{symbol.lower()}_{freq}.parquet"
         resampled.to_parquet(dest, index=False)
         logging.info("Wrote %s rows to %s", len(resampled), dest)

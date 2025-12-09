@@ -32,6 +32,6 @@ logging:
   signal_log_path: "data/live_signals.log"
 
 model:
-  registry_path: "research/models/model_registry.json"
+  registry_path: "research/models/registry.json"
   active_version: null
 

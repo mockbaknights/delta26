@@ -48,9 +48,8 @@ def daterange(start: date, end: date) -> List[date]:
 def download_day(s3_client, dt: date) -> str:
     date_str = dt.isoformat()
     key = f"{PREFIX_ROOT}/{dt.year}/{dt.month:02d}/{date_str}.csv.gz"
-    dest_dir = DEST_ROOT / str(dt.year)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / f"{date_str}.csv.gz"
+    DEST_ROOT.mkdir(parents=True, exist_ok=True)
+    dest_path = DEST_ROOT / f"{date_str}.csv.gz"
 
     if dest_path.exists():
         logging.info("File exists, skipping %s", date_str)
