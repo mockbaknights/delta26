@@ -1,0 +1,11 @@
+python-dotenv
+polygon-api-client
+pandas
+numpy
+pyarrow
+scikit-learn
+xgboost
+joblib
+pyyaml
+boto3
+

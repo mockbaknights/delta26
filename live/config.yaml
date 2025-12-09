@@ -1,0 +1,37 @@
+
+polygon:
+  api_key_from_env: true
+
+symbols:
+  - SPY
+
+modes:
+  intraday:
+    enabled: true
+    base_interval: "1m"
+    derived_intervals: ["2m", "3m", "5m", "10m"]
+    poll_seconds: 30
+    prob_thresholds:
+      strong_buy: 0.75
+      buy: 0.6
+      sell: 0.4
+      strong_sell: 0.25
+  swing:
+    enabled: true
+    base_interval: "1m"
+    derived_intervals: ["4h", "1d", "1w"]
+    poll_seconds: 300
+    prob_thresholds:
+      strong_buy: 0.75
+      buy: 0.6
+      sell: 0.4
+      strong_sell: 0.25
+
+logging:
+  level: INFO
+  signal_log_path: "data/live_signals.log"
+
+model:
+  registry_path: "research/models/model_registry.json"
+  active_version: null
+
