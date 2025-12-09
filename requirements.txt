@@ -8,4 +8,7 @@ xgboost
 joblib
 pyyaml
 boto3
+fastapi
+uvicorn[standard]
+aiofiles
 
