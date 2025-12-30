@@ -8,8 +8,11 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import os
+import logging
 
 SIGNAL_LOG_PATH = Path("data/live_signals.log")
+MODE = (os.getenv("DELTA26_MODE") or "live").lower()
 
 
 def log_signal(
@@ -25,6 +28,9 @@ def log_signal(
     """
     Log a signal to stdout and append to a JSONL file.
     """
+    if MODE != "live":
+        logging.info("[SHADOW] Alert suppressed for %s %s %s", symbol, interval, signal)
+        return
     ts = datetime.now(timezone.utc).isoformat()
     payload = {
         "timestamp": ts,
@@ -47,4 +53,7 @@ def log_signal(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a") as f:
         f.write(json.dumps(payload) + "\n")
+
+
+
 
