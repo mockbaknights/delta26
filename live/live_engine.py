@@ -9,6 +9,7 @@ import time
 import logging
 import json
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Dict, Tuple, Any
 
@@ -24,6 +25,13 @@ import yaml
 from dotenv import load_dotenv
 from polygon import RESTClient
 
+NY = ZoneInfo("America/New_York")
+
+def get_market_date():
+    # Prevent requesting future data
+    now_ny = datetime.now(NY)
+    return now_ny.date()
+
 from live import alerts, risk
 from live.feature_builder import (
     aggregate_bars,
@@ -35,7 +43,13 @@ from live.strategy_loader import classify_signal, load_model, predict_proba, res
 from common.utils import fetch_intraday
 
 # Load environment (for POLYGON_API_KEY)
-load_dotenv()
+api_key = os.getenv("POLYGON_API_KEY")
+logging.info(f"[DEBUG] Polygon key length = {len(api_key) if api_key else 'MISSING'}")
+
+MODE = (os.getenv("DELTA26_MODE") or "live").lower()
+IS_LIVE = MODE == "live"
+IS_SHADOW = MODE == "shadow"
+logging.info(f"[MODE] DELTA26_MODE={MODE} (IS_LIVE={IS_LIVE}, IS_SHADOW={IS_SHADOW})")
 
 CONFIG_PATH = Path("live/config.yaml")
 
@@ -43,6 +57,10 @@ CONFIG_PATH = Path("live/config.yaml")
 def load_config(path: Path = CONFIG_PATH) -> dict:
     with path.open() as f:
         return yaml.safe_load(f)
+
+
+def running_under_pm2() -> bool:
+    return bool(os.getenv("PM2_HOME") or os.getenv("PM2"))
 
 
 def init_logging(level: str) -> None:
@@ -124,6 +142,18 @@ def stream_signal(payload: dict, path: Path) -> None:
         f.write(json.dumps(payload) + "\n")
 
 
+def write_signal(payload: dict, path="data/live_stream.jsonl"):
+    """
+    Append a live signal to the SSE stream file.
+    Payload must be JSON-serializable.
+    """
+    try:
+        with open(path, "a") as f:
+            f.write(json.dumps(payload) + "\n")
+    except Exception as e:
+        print(f"Error writing signal:", e)
+
+
 def fetch_recent_1m(
     client: RESTClient, symbol: str, lookback_minutes: int = 400
 ):
@@ -132,11 +162,16 @@ def fetch_recent_1m(
     """
     end_dt = datetime.now(timezone.utc)
     start_dt = end_dt - timedelta(minutes=lookback_minutes)
+    target_date = end_dt.date()
+    if target_date > get_market_date():
+        logging.warning("Skipping fetch: market date %s is in the future (NY time)", target_date)
+        return pd.DataFrame()
+
     df = fetch_intraday(
         client,
         ticker=symbol,
         start=start_dt.date().isoformat(),
-        end=end_dt.date().isoformat(),
+        end=target_date.isoformat(),
     )
     if df is None or df.empty:
         logging.warning("No intraday data for %s between %s and %s", symbol, start_dt.date(), end_dt.date())
@@ -146,6 +181,9 @@ def fetch_recent_1m(
 
 
 def run_loop(config: dict) -> None:
+    if not running_under_pm2():
+        load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
+
     api_key = os.getenv("POLYGON_API_KEY")
     if not api_key:
         raise RuntimeError("POLYGON_API_KEY is not set. Check your .env or environment.")
@@ -169,6 +207,9 @@ def run_loop(config: dict) -> None:
 
     bars_cache: Dict[Tuple[str, str], pd.DataFrame] = {}
     last_run: Dict[str, float] = {}
+    backoff_until: Dict[Tuple[str, str], float] = {}
+    backoff_seconds: Dict[Tuple[str, str], float] = {}
+    backoff_warned: Dict[Tuple[str, str], bool] = {}
 
     logging.info("Starting live engine for symbols=%s", symbols)
 
@@ -189,17 +230,34 @@ def run_loop(config: dict) -> None:
 
             for symbol in symbols:
                 try:
+                    backoff_key = (mode_name, symbol)
+                    if now_ts < backoff_until.get(backoff_key, 0):
+                        continue
+
                     recent = fetch_recent_1m(
                         client, symbol, lookback_minutes=800 if mode_name == "swing" else 400
                     )
                     if recent is None or recent.empty:
-                        logging.warning("No data fetched for %s; skipping cycle", symbol)
+                        # Apply backoff to avoid hammering when Polygon returns 404/NoData
+                        prev = backoff_seconds.get(backoff_key, 0)
+                        delay = 30 if prev == 0 else min(prev * 2, 300)  # cap 5 minutes
+                        backoff_seconds[backoff_key] = delay
+                        backoff_until[backoff_key] = time.time() + delay
+                        if not backoff_warned.get(backoff_key, False):
+                            logging.warning("No data fetched for %s; backing off %.0fs", symbol, delay)
+                            backoff_warned[backoff_key] = True
+                        else:
+                            logging.debug("No data fetched for %s; backing off %.0fs", symbol, delay)
                         continue
 
                     cache_key = (symbol, base_interval)
                     cached = bars_cache.get(cache_key)
                     merged = merge_new_bars(cached, recent)
                     bars_cache[cache_key] = merged
+                    # reset backoff on successful fetch
+                    backoff_seconds.pop(backoff_key, None)
+                    backoff_until.pop(backoff_key, None)
+                    backoff_warned.pop(backoff_key, None)
 
                     for interval in derived_intervals:
                         bars_for_interval = (
@@ -230,6 +288,19 @@ def run_loop(config: dict) -> None:
                             continue
 
                         if risk.should_trade(signal, mode_name):
+                            timestamp_iso_string = bars_for_interval["timestamp"].iloc[-1].isoformat()
+                            direction = signal
+                            confidence = prob
+                            risk_blocked = False
+                            signal_payload = {
+                                "timestamp": timestamp_iso_string,
+                                "symbol": symbol,
+                                "interval": str(interval),
+                                "direction": direction,        # "BUY" or "SELL"
+                                "confidence_pct": int(confidence * 100),
+                                "risk_blocked": risk_blocked,
+                            }
+                            write_signal(signal_payload)
                             alerts.log_signal(
                                 symbol,
                                 interval,
